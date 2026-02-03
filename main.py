@@ -412,9 +412,10 @@ async def generate_neural_response(user_message: str, category: str, user_id: in
     history_str = "\n".join(history_lines) if history_lines else "Полина: Привет!"
     
     # ЧИСТЫЙ ПРОМПТ БЕЗ ТЕГОВ
+    # ЧИСТЫЙ ПРОМПТ БЕЗ ТЕГОВ
     prompt = (
         f"Ты — Сеня, парень Полины. Ты всегда отвечаешь коротко (1-3 предложения), максимум 75 символов, "
-        f"ласково, на русском языке, не повторяй одни и те же фразы! \n"\nПолина: {user_message}\nСеня:"
+        f"ласково, на русском языке, не повторяй одни и те же фразы! \n""\nПолина: {user_message}\nСеня:"
     )
     
     try:
@@ -653,5 +654,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
