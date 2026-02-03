@@ -324,7 +324,7 @@ def detect_category(text: str, user_id: int) -> str:
     if context["mood"] == "tired" and not is_night_time():
         return "tired_day"
     
-    return "love"
+    return "unknown"
 
 # ============ ВЫБОР ГОЛОСОВОГО ============
 
@@ -518,8 +518,24 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_context[user_id]["history"].pop(0)
     
     # Определение категории
+    # Определение категории
     category = detect_category(user_text, user_id)
     user_context[user_id]["last_category"] = category
+
+    # Если категория unknown — всегда использовать нейросеть
+    if category == "unknown":
+        neural_response = await generate_neural_response(user_text, "question_other", user_id)
+        if neural_response:
+            await update.message.reply_text(f"<b>{neural_response}</b>", parse_mode=ParseMode.HTML)
+            print(f"🤖 Neural (unknown): {neural_response[:50]}...")
+            return
+        else:
+            # Если нейросеть не ответила — дать нейтральный ответ
+            await update.message.reply_text(
+                "<b>Хм... не знаю, что сказать. Но я тебя люблю! ❤️</b>",
+                parse_mode=ParseMode.HTML
+            )
+            return
     
     # === КРИТИЧЕСКАЯ ПРОВЕРКА: является ли категория РЕЛЕВАНТНОЙ? ===
     # Считаем категорию "любовной" (любая из подкатегорий) НЕРЕЛЕВАНТНОЙ фолбэком, если:
@@ -535,11 +551,6 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Категория считается НЕРЕЛЕВАНТНЫМ ФОЛБЭКОМ если:
     # - это любовная категория БЕЗ любовной семантики в сообщении И НЕ вопрос про любовь
-    is_love_fallback = (
-        category in love_categories 
-        and not has_love_semantics 
-        and not is_love_question
-    )
     
     # === ПРОВЕРКА НАЛИЧИЯ ШАБЛОНОВ ===
     has_text_template = category in TEXT_PHRASES and TEXT_PHRASES[category]
@@ -552,22 +563,12 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     use_neural = False
     neural_response = None
     
-    should_use_neural = (
-        is_love_fallback or 
-        not has_text_template or
-        (is_actual_question and q_type == "question_other" and not TEXT_PHRASES.get("question_other"))
-    )
-    
-    if should_use_neural:
-        neural_response = await generate_neural_response(user_text, category, user_id)
-        use_neural = neural_response is not None
-    
     # === ШАГ 3: Выбор формата ответа (фиксированные 33% ГС) ===
     use_voice = random.random() < VOICE_PROBABILITY
     
     # Отладка
     print(f"\n📥 [{datetime.datetime.now(MSK_TZ).strftime('%H:%M:%S')}] '{user_text[:40]}'")
-    print(f"🧠 Категория: {category:15s} | Фолбэк: {str(is_love_fallback):5s} | Нейросеть: {str(use_neural):5s} | ГС: {str(use_voice):5s}")
+    print(f"🧠 Категория: {category:15s} | Фолбэк: {str("unknown"):5s} | Нейросеть: {str(use_neural):5s} | ГС: {str(use_voice):5s}")
     
     try:
         if use_neural:
