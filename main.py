@@ -398,28 +398,25 @@ async def generate_neural_response(user_message: str, category: str, user_id: in
     
     # Формируем промпт с примерами в стиле "few-shot learning"
         # === ИСПРАВЛЕННЫЙ ПРОМПТ ДЛЯ tinyllama / большинства простых моделей ===
+        # Примеры для стиля
     examples = []
-    category_examples = TEXT_PHRASES.get(category, [])[:2]
-    love_examples = TEXT_PHRASES["love"][:2]
-    
-    for ex in (category_examples + love_examples):
+    for ex in (TEXT_PHRASES.get(category, [])[:2] + TEXT_PHRASES["love"][:2]):
         examples.append(f"Полина: ...\nСеня: {ex}")
     
     examples_text = "\n".join(examples)
     
-    context_msgs = user_context.get(user_id, {}).get("history", [])[-2:]
-    dialogue_history = ""
-    for msg in context_msgs:
-        dialogue_history += f"Полина: {msg}\n"
+    # История диалога
+    history_lines = []
+    for msg in user_context.get(user_id, {}).get("history", [])[-2:]:
+        history_lines.append(f"Полина: {msg}")
+    history_str = "\n".join(history_lines) if history_lines else "Полина: Привет!"
     
+    # ЧИСТЫЙ ПРОМПТ БЕЗ ТЕГОВ
     prompt = (
-        "Ты — Сеня, любящий парень Полины. Ты всегда отвечаешь коротко(1-3 предложения) и в соответствии с примерами, "
-        "ласково. Не будь формальным.\n\n"
-        "Примеры:\n" + examples_text + "\n\n"
-        "Текущий диалог:\n" +
-        dialogue_history +
-        f"Полина: {user_message}\n"
-        "Сеня:"
+        f"Ты — Сеня, парень Полины. Ты всегда отвечаешь коротко (1-3 предложения), максимум 75 символов, "
+        f"ласково, на русском языке, ориентируйся на примеры.\n\n"
+        f"Примеры:\n{examples_text}\n\n"
+        f"Диалог:\n{history_str}\nПолина: {user_message}\nСеня:"
     )
     
     try:
@@ -447,6 +444,23 @@ async def generate_neural_response(user_message: str, category: str, user_id: in
                 answer = re.sub(r'^["\'*#]+|["\'*#]+$', '', answer)
                 answer = ' '.join(answer.split())[:120]
                 
+                # === НОВЫЕ ПРОВЕРКИ: ОТКЛОНЕНИЕ ПЛОХИХ ОТВЕТОВ ===
+                # Отклонять ответы на других языках (нет русских букв)
+                if answer and not re.search(r'[а-яА-Я]', answer):
+                    print(f"❌ Ответ не на русском: {answer[:50]}...")
+                    return None
+
+                # Отклонять ответы с иностранными именами/приветствиями
+                if answer and re.search(r'(Seyna|Señora|Hey|Hello|Dear|Hi\b)', answer, re.IGNORECASE):
+                    print(f"❌ Иностранное имя/приветствие: {answer[:50]}...")
+                    return None
+
+                # Отклонять слишком короткие или странные ответы
+                if not answer or len(answer) < 8 or answer.count(' ') < 1:
+                    print(f"❌ Слишком короткий/странный ответ: '{answer}'")
+                    return None
+                # ================================================
+
                 # Добавляем эмодзи для стиля
                 if answer and "💋" not in answer and "❤️" not in answer and random.random() < 0.6:
                     answer += " 💋"
