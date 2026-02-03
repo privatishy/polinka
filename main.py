@@ -397,25 +397,30 @@ async def generate_neural_response(user_message: str, category: str, user_id: in
     love_examples = TEXT_PHRASES["love"][:4]
     
     # Формируем промпт с примерами в стиле "few-shot learning"
-    examples_text = "\n".join([f"Полина: ...\nСеня: {ex}" for ex in (category_examples[:2] + love_examples[:2])])
+        # === ИСПРАВЛЕННЫЙ ПРОМПТ ДЛЯ tinyllama / большинства простых моделей ===
+    examples = []
+    category_examples = TEXT_PHRASES.get(category, [])[:2]
+    love_examples = TEXT_PHRASES["love"][:2]
     
-    # Контекст из истории
+    for ex in (category_examples + love_examples):
+        examples.append(f"Полина: ...\nСеня: {ex}")
+    
+    examples_text = "\n".join(examples)
+    
     context_msgs = user_context.get(user_id, {}).get("history", [])[-2:]
-    context_str = " → ".join(context_msgs) if context_msgs else "только что начали диалог"
+    dialogue_history = ""
+    for msg in context_msgs:
+        dialogue_history += f"Полина: {msg}\n"
     
-    # Промпт в формате модели
-    prompt = f"""<|system|>
-Ты — Сеня, парень Полины. Отвечай ТОЧНО как в примерах: коротко (1-2 предложения), с ласковыми словами (писюля, зайка, шушик, солнышко), иногда глуповато. Не используй формальные фразы. Максимум 80 символов.
-
-Примеры:
-{examples_text}
-
-<|user|>
-Контекст: {context_str}
-Полина: {user_message}
-
-<|assistant|>
-Сеня:"""
+    prompt = (
+        "Ты — Сеня, любящий парень Полины. Ты всегда отвечаешь коротко(1-3 предложения) и в соответствии с примерами, "
+        "ласково. Не будь формальным.\n\n"
+        "Примеры:\n" + examples_text + "\n\n"
+        "Текущий диалог:\n" +
+        dialogue_history +
+        f"Полина: {user_message}\n"
+        "Сеня:"
+    )
     
     try:
         async with httpx.AsyncClient(timeout=NEURAL_TIMEOUT) as client:
