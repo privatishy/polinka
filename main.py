@@ -387,39 +387,40 @@ def get_voice_files(category: str) -> list:
 
 # ============ НЕЙРОСЕТЬ: ГЕНЕРАЦИЯ ОТВЕТА ЧЕРЕЗ OLLAMA ============
 
-async def generate_neural_response(user_message: str, category: str, user_id: int) -> str | None:
-    """Генерирует ответ через локальную модель Ollama с обучением на шаблонах"""
+async def generate_neural_response(user_message: str, category: str, user_id: int, attempt: int = 1) -> str | None:
+    """Генерирует ответ через Ollama с защитой от отказных ответов. Поддерживает 2 попытки."""
     if not USE_NEURAL_FALLBACK:
         return None
+
+    # === ИСТОРИЯ ДИАЛОГА (последние 2 сообщения Полины) ===
+    context = user_context.get(user_id, {"history": []})
+    history = context["history"][-2:]
     
-    # Получаем примеры из нужной категории + общие любовные фразы для стиля
-    category_examples = TEXT_PHRASES.get(category, [])
-    love_examples = TEXT_PHRASES["love"][:4]
-    
-    # Формируем промпт с примерами в стиле "few-shot learning"
-        # === ИСПРАВЛЕННЫЙ ПРОМПТ ДЛЯ tinyllama / большинства простых моделей ===
-        # Примеры для стиля
-    examples = []
-    for ex in (TEXT_PHRASES.get(category, [])[:2] + TEXT_PHRASES["love"][:2]):
-        examples.append(f"Полина: ...\nСеня: {ex}")
-    
-    examples_text = "\n".join(examples)
-    
-    # История диалога
+    # Формируем историю в формате диалога
     history_lines = []
-    for msg in user_context.get(user_id, {}).get("history", [])[-2:]:
+    for msg in history:
         history_lines.append(f"Полина: {msg}")
-    history_str = "\n".join(history_lines) if history_lines else "Полина: Привет!"
+        # Добавляем пример ответа Сени для контекста
+        history_lines.append("Сеня: Люблю тебя, зайка 💋")
     
-    # ЧИСТЫЙ ПРОМПТ БЕЗ ТЕГОВ
-    # ЧИСТЫЙ ПРОМПТ БЕЗ ТЕГОВ
-    # ПРАВИЛЬНО — f-строка с подстановкой
+    history_str = "\n".join(history_lines) if history_lines else "Полина: Привет"
+
+    # === МОЩНЫЙ ПРОМПТ В ФОРМАТЕ, ПОНЯТНОМ TINYLLAMA/QWEN ===
+    # Tinyllama НЕ понимает сложные системные инструкции — только примеры диалога!
     prompt = (
-        "Ты — Сеня, парень Полины. Отвечай коротко и ласково на русском.\n\n"
+        "Полина: Привет\n"
+        "Сеня: Привет, Полиночка! Что ты, как ты? Рассказывай 💋\n"
+        "Полина: Как дела?\n"
+        "Сеня: Всё хорошо, зайка! Скучаю по тебе ❤️\n"
+        "Полина: Я устала\n"
+        "Сеня: Отдыхай, малышка. Я тебя люблю 💕\n"
+        "Полина: Ты меня любишь?\n"
+        "Сеня: Больше всех на свете! 💋💋💋\n"
+        f"{history_str}\n"
         f"Полина: {user_message}\n"
         "Сеня:"
     )
-    
+
     try:
         async with httpx.AsyncClient(timeout=NEURAL_TIMEOUT) as client:
             response = await client.post(
@@ -429,51 +430,87 @@ async def generate_neural_response(user_message: str, category: str, user_id: in
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.7,
-                        "num_predict": 60,
-                        "stop": ["\n", "Полина:", "<|"]
+                        "temperature": 0.9,   # Выше для креативности
+                        "top_p": 0.95,
+                        "num_predict": 60,    # Хватит на 1-2 предложения
+                        "stop": ["\n", "Полина:", "Сеня:", "<|", "###", "—", ":", "?", "!"]
                     }
                 }
             )
             
-            if response.status_code == 200:
-                data = response.json()
-                answer = data.get("response", "").strip()
-                
-                # Очищаем ответ
-                answer = re.sub(r'^Сеня[:\-\s]*', '', answer, flags=re.IGNORECASE)
-                answer = re.sub(r'^["\'*#]+|["\'*#]+$', '', answer)
-                answer = ' '.join(answer.split())[:120]
-                
-                # === НОВЫЕ ПРОВЕРКИ: ОТКЛОНЕНИЕ ПЛОХИХ ОТВЕТОВ ===
-                # Отклонять ответы на других языках (нет русских букв)
-                if answer and not re.search(r'[а-яА-Я]', answer):
-                    print(f"❌ Ответ не на русском: {answer[:50]}...")
-                    return None
-
-                # Отклонять ответы с иностранными именами/приветствиями
-                if answer and re.search(r'(Seyna|Señora|Hey|Hello|Dear|Hi\b)', answer, re.IGNORECASE):
-                    print(f"❌ Иностранное имя/приветствие: {answer[:50]}...")
-                    return None
-
-                # Отклонять слишком короткие или странные ответы
-                if not answer or len(answer) < 8 or answer.count(' ') < 1:
-                    print(f"❌ Слишком короткий/странный ответ: '{answer}'")
-                    return None
-                # ================================================
-
-                # Добавляем эмодзи для стиля
-                if answer and "💋" not in answer and "❤️" not in answer and random.random() < 0.6:
-                    answer += " 💋"
-                
-                return answer if answer else None
-            else:
-                print(f"⚠️ Ollama error {response.status_code}: {response.text[:100]}")
+            if response.status_code != 200:
+                print(f"⚠️ Ollama error {response.status_code}")
                 return None
-                
+
+            data = response.json()
+            raw_answer = data.get("response", "").strip()
+            
+            # === ОЧИСТКА ОТВЕТА ===
+            answer = re.sub(r'^(Сеня|Я)[:\-\s]*', '', raw_answer, flags=re.IGNORECASE)
+            answer = re.sub(r'^["\'*#\s]+|["\'*#\s]+$', '', answer)
+            answer = ' '.join(answer.split())[:120].strip(".,!?;: ")
+
+            # === АГРЕССИВНАЯ ФИЛЬТРАЦИЯ ОТКАЗНЫХ ОТВЕТОВ ===
+            bad_patterns = [
+                r'извини(те)?\b',
+                r'не (могу|умею|знаю|понимаю|вижу)',
+                r'недоступно',
+                r'отказываюсь',
+                r'я (— )?ассистент',
+                r'я (— )?искусственный интеллект',
+                r'я (— )?нейросеть',
+                r'я не (Сеня|парень)',
+                r'пользователь',
+                r'запрещено',
+                r'нельзя',
+                r'только текст',
+                r'английском',
+                r'русском языке',  # Модель часто упоминает это при отказе
+                r'^[А-Я][а-я]{0,3}$',  # Одно слово с большой буквы (часто "Да", "Нет" — плохой ответ)
+                r'^\.{2,}$'  # Многоточие
+            ]
+            
+            if not answer or len(answer) < 5:
+                print(f"❌ Попытка {attempt}: пустой/короткий ответ")
+                return await _retry_or_fallback(user_message, category, user_id, attempt)
+            
+            if re.search(r'[a-zA-Z]{4,}', answer) and not re.search(r'[а-яА-Я]{3,}', answer):
+                print(f"❌ Попытка {attempt}: ответ не на русском")
+                return await _retry_or_fallback(user_message, category, user_id, attempt)
+            
+            for pattern in bad_patterns:
+                if re.search(pattern, answer, re.IGNORECASE):
+                    print(f"❌ Попытка {attempt}: отклонён по паттерну '{pattern}' → '{answer[:40]}'")
+                    return await _retry_or_fallback(user_message, category, user_id, attempt)
+            
+            # === ДОБАВЛЕНИЕ ЭМОДЗИ (если нет) ===
+            if answer and not re.search(r'[💋❤️💕🥰😘]', answer) and random.random() < 0.7:
+                emoji = random.choice(["💋", "❤️", "💕", "💋💋"])
+                answer = f"{answer.rstrip('.!?)}] ')} {emoji}".strip()
+            
+            # Финальная проверка на осмысленность
+            if len(answer.split()) < 2 or answer.count(' ') == 0:
+                print(f"❌ Попытка {attempt}: бессмысленный ответ '{answer}'")
+                return await _retry_or_fallback(user_message, category, user_id, attempt)
+            
+            print(f"✅ Нейросеть (попытка {attempt}): '{answer}'")
+            return answer
+            
     except Exception as e:
-        print(f"⚠️ Ollama generation failed: {str(e)[:100]}")
-        return None
+        print(f"⚠️ Ollama failed (попытка {attempt}): {str(e)[:100]}")
+        return await _retry_or_fallback(user_message, category, user_id, attempt)
+
+async def _retry_or_fallback(user_message: str, category: str, user_id: int, attempt: int) -> str | None:
+    """Повторная генерация (макс. 2 попытки) или фолбэк на шаблоны"""
+    if attempt < 2:
+        print(f"🔄 Повторная генерация (попытка {attempt + 1})...")
+        return await generate_neural_response(user_message, category, user_id, attempt + 1)
+    
+    # Фолбэк на шаблоны после 2 неудачных попыток
+    print(f"⚠️ Нейросеть не ответила после 2 попыток. Фолбэк на шаблоны.")
+    fallback_category = category if category in TEXT_PHRASES and TEXT_PHRASES[category] else "love"
+    phrase = random.choice(TEXT_PHRASES[fallback_category])
+    return f"<b>{phrase}</b>"
 
 # ============ ОБРАБОТЧИКИ ============
 
@@ -518,70 +555,35 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(user_context[user_id]["history"]) > 3:
         user_context[user_id]["history"].pop(0)
     
-    # Определение категории
-    # Определение категории
     category = detect_category(user_text, user_id)
     user_context[user_id]["last_category"] = category
 
-    # Если категория unknown — всегда использовать нейросеть
-    if category == "unknown":
-        neural_response = await generate_neural_response(user_text, "question_other", user_id)
-        if neural_response:
-            await update.message.reply_text(f"<b>{neural_response}</b>", parse_mode=ParseMode.HTML)
-            print(f"🤖 Neural (unknown): {neural_response[:50]}...")
-            return
-        else:
-            # Если нейросеть не ответила — дать нейтральный ответ
-            await update.message.reply_text(
-                "<b>Хм... не знаю, что сказать. Но я тебя люблю! ❤️</b>",
-                parse_mode=ParseMode.HTML
-            )
-            return
+    # === НЕЙРОСЕТЬ КАК ОСНОВНОЙ ГЕНЕРАТОР ===
+    # Используем нейросеть ВСЕГДА, кроме явных кейсов (спокойной ночи, смех)
+    force_template_categories = ["goodnight", "laugh", "greeting"]
+    use_neural = category not in force_template_categories
     
-    # === КРИТИЧЕСКАЯ ПРОВЕРКА: является ли категория РЕЛЕВАНТНОЙ? ===
-    # Считаем категорию "любовной" (любая из подкатегорий) НЕРЕЛЕВАНТНОЙ фолбэком, если:
-    # 1. В сообщении пользователя нет любовной/аффективной семантики
-    # 2. И это не вопрос про любовь/отношения
-    love_categories = ["love", "love_intense", "love_personal", "comfort"]
-    has_love_semantics = bool(re.search(
-        r"(люблю|обожаю|обнимаю|целую|скучаю|лучш|красив|хорош|мил|няш|солнышко|зайк|писюл|полин|ушк|русин|очк|❤️|💋|💕|обожа|безумно|страстно)",
-        user_text.lower()
-    ))
-    is_actual_question, q_type = is_question(user_text)
-    is_love_question = q_type in ["love_question", "future_question"]
-    
-    # Категория считается НЕРЕЛЕВАНТНЫМ ФОЛБЭКОМ если:
-    # - это любовная категория БЕЗ любовной семантики в сообщении И НЕ вопрос про любовь
-    
-    # === ПРОВЕРКА НАЛИЧИЯ ШАБЛОНОВ ===
-    has_text_template = category in TEXT_PHRASES and TEXT_PHRASES[category]
-    has_voice_template = bool(get_voice_files(category))
-    
-    # === РЕШЕНИЕ: использовать нейросеть ЕСЛИ ===
-    # 1. Категория — нерелевантный фолбэк на любовь ИЛИ
-    # 2. Нет текстовых шаблонов для категории ИЛИ
-    # 3. Это вопрос без точной классификации и без шаблонов
-    use_neural = False
     neural_response = None
+    if use_neural:
+        neural_response = await generate_neural_response(user_text, category, user_id)
     
-    # === ШАГ 3: Выбор формата ответа (фиксированные 33% ГС) ===
+    # === ВЫБОР ФОРМАТА ОТВЕТА ===
     use_voice = random.random() < VOICE_PROBABILITY
     
-    # Отладка
     print(f"\n📥 [{datetime.datetime.now(MSK_TZ).strftime('%H:%M:%S')}] '{user_text[:40]}'")
-    print(f"🧠 Категория: {category:15s} | Фолбэк: {str("unknown"):5s} | Нейросеть: {str(use_neural):5s} | ГС: {str(use_voice):5s}")
+    print(f"🧠 Категория: {category:15s} | Нейросеть: {str(bool(neural_response)):5s} | ГС: {str(use_voice):5s}")
     
     try:
-        if use_neural:
-            # Отправляем нейросетевой ответ (только текст)
+        if neural_response and not neural_response.startswith("<b>"):  # Не шаблонный фолбэк
+            # Отправляем чистый нейросетевой ответ
             await update.message.reply_text(
                 f"<b>{neural_response}</b>",
                 parse_mode=ParseMode.HTML
             )
-            print(f"🤖 Neural: {neural_response[:50]}...")
+            print(f"🤖 Neural: {neural_response[:60]}...")
             
-        elif use_voice and has_voice_template:
-            # Отправляем голосовое из шаблона
+        elif use_voice:
+            # Голосовое из шаблонов
             candidates = get_voice_files(category)
             if candidates:
                 voice_path = random.choice(candidates)
@@ -591,19 +593,18 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 # Фолбэк на текст
                 phrase = random.choice(TEXT_PHRASES.get(category, TEXT_PHRASES["love"]))
-                await update.message.reply_text(phrase, parse_mode=ParseMode.HTML)
-                print(f"💬 Fallback text")
+                await update.message.reply_text(f"<b>{phrase}</b>", parse_mode=ParseMode.HTML)
                 
         else:
-            # Отправляем текстовый шаблон
+            # Текстовый шаблон
             phrase = random.choice(TEXT_PHRASES.get(category, TEXT_PHRASES["love"]))
-            await update.message.reply_text(phrase, parse_mode=ParseMode.HTML)
-            print(f"💬 Text: {phrase[:50]}...")
-    
+            await update.message.reply_text(f"<b>{phrase}</b>", parse_mode=ParseMode.HTML)
+            print(f"💬 Text: {phrase[:60]}...")
+
     except Exception as e:
-        print(f"❌ Ошибка: {e}")
+        print(f"❌ Ошибка отправки: {e}")
         await update.message.reply_text(
-            "<b>Что-то пошло не так, но я всё равно тебя люблю! ❤️</b>",
+            "<b>💋💋💋</b>",
             parse_mode=ParseMode.HTML
         )
 
@@ -656,7 +657,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
