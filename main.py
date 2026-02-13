@@ -546,10 +546,10 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(user_context[user_id]["history"]) > 3:
         user_context[user_id]["history"].pop(0)
     
-    # Формируем контекстный хеш из последних 2 сообщений
+    # Формируем контекстный хеш из последних 2 сообщений (6 символов для экономии)
     history = user_context[user_id]["history"]
     context_string = " || ".join(history[-2:]) if len(history) >= 2 else (history[0] if history else user_text)
-    context_hash = hashlib.md5(context_string.encode()).hexdigest()[:8]  # 8 символов для колбэка
+    context_hash = hashlib.md5(context_string.encode()).hexdigest()[:6]  # ← 6 символов вместо 8!
     
     # Определение категории
     category = detect_category(user_text, user_id)
@@ -569,10 +569,16 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chosen_voice, response_id = choose_best_candidate(context_hash, category, voice_candidates, 'voice')
             
             if chosen_voice:
-                # Создаём инлайн-кнопки с эмодзи для цветовой индикации
+                # ⚠️ КРИТИЧЕСКИ ВАЖНО: сжимаем колбэк до ≤64 байт!
+                # Формат: "r:1:abc123vxxxxxx" (1+1+1+6+1+6 = 16 символов макс)
+                # где: 1=лайк, 0=дизлайк, v=голос, t=текст, xxxxxx=первые 6 символов ответа
+                short_resp_id = response_id[:6]  # ← только 6 символов!
+                callback_like = f"r:1:{context_hash}v{short_resp_id}"
+                callback_dislike = f"r:0:{context_hash}v{short_resp_id}"
+                
                 keyboard = [[
-                    InlineKeyboardButton("✅", callback_data=f"rl:l:{context_hash}:v:{response_id}"),
-                    InlineKeyboardButton("❌", callback_data=f"rl:d:{context_hash}:v:{response_id}")
+                    InlineKeyboardButton("✅", callback_data=callback_like),
+                    InlineKeyboardButton("❌", callback_data=callback_dislike)
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
@@ -580,16 +586,17 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(chosen_voice, "rb") as f:
                     await update.message.reply_voice(voice=f, reply_markup=reply_markup)
                 
-                # Гарантируем существование записи в БД
+                # Гарантируем существование записи в БД (полный ID!)
                 ensure_response_exists(context_hash, category, 'voice', response_id)
-                print(f"🎤 Voice: {chosen_voice.name} (ID: {response_id})")
+                print(f"🎤 Voice: {chosen_voice.name} (ID: {response_id}, short: {short_resp_id})")
             else:
                 # Fallback на текст
                 text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
                 chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
+                short_resp_id = response_id[:6]
                 keyboard = [[
-                    InlineKeyboardButton("✅", callback_data=f"rl:l:{context_hash}:t:{response_id}"),
-                    InlineKeyboardButton("❌", callback_data=f"rl:d:{context_hash}:t:{response_id}")
+                    InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}"),
+                    InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}")
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -601,15 +608,16 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
             chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
             
+            short_resp_id = response_id[:6]  # ← критически важно!
             keyboard = [[
-                InlineKeyboardButton("✅", callback_data=f"rl:l:{context_hash}:t:{response_id}"),
-                InlineKeyboardButton("❌", callback_data=f"rl:d:{context_hash}:t:{response_id}")
+                InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}"),
+                InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}")
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             ensure_response_exists(context_hash, category, 'text', response_id)
-            print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id})")
+            print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id}, short: {short_resp_id})")
 
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
@@ -619,56 +627,104 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки лайк/дизлайк"""
+    """Обработчик нажатий на кнопки лайк/дизлайк (с поддержкой сжатого формата)"""
     query = update.callback_query
     await query.answer()
     
     data = query.data
-    # Формат: rl:l:abc123:v:filename или rl:d:abc123:t:hash
-    if not data.startswith("rl:"):
+    # Формат: "r:1:abc123vxxxxxx" где:
+    #   r = rl prefix
+    #   1 = like (0 = dislike)
+    #   abc123 = 6-символьный хеш контекста
+    #   v/t = тип ответа (voice/text)
+    #   xxxxxx = первые 6 символов response_id
+    if not data.startswith("r:"):
         return
     
     try:
+        # Парсим сжатый формат
         parts = data.split(":")
-        if len(parts) != 5:
+        if len(parts) != 3:
             return
         
-        action = parts[1]  # 'l' или 'd'
-        context_hash = parts[2]
-        response_type_short = parts[3]  # 't' или 'v'
-        response_id = parts[4]
+        action = parts[1]  # '1' или '0'
+        rest = parts[2]    # "abc123vxxxxxx"
+        
+        if len(rest) < 8:  # минимум 6 символов хеш + 1 тип + 1 символ ответа
+            return
+        
+        context_hash = rest[:6]
+        response_type_short = rest[6]
+        short_response_id = rest[7:13] if len(rest) >= 13 else rest[7:]
         
         # Преобразуем короткие типы
         response_type = 'text' if response_type_short == 't' else 'voice'
-        delta = 1 if action == 'l' else -5
+        delta = 1 if action == '1' else -5
         
-        # Обновляем рейтинг в БД
-        update_rating(context_hash, response_type, response_id, delta)
-        
-        # Формируем сообщение подтверждения
-        if action == 'l':
-            feedback_text = "❤️ Спасибо, Полиночка! Я запомнил, что тебе это понравилось."
-            # Для визуального подтверждения используем анимацию сердца
-            await query.edit_message_text(
-                text=feedback_text,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❤️", callback_data="noop")
-                ]])
+        # ⚠️ ВАЖНО: для поиска в БД используем ПОЛНЫЙ ответ из контекста!
+        # Но так как мы не храним маппинг short→full, обновляем ВСЕ записи с этим хешем и типом
+        # (это безопасно — в одном контексте редко бывает много вариантов одного типа)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            # Находим полный response_id по префиксу
+            cursor.execute(
+                '''SELECT response_id FROM responses 
+                   WHERE context_hash = ? AND response_type = ? 
+                   AND response_id LIKE ? 
+                   ORDER BY rating DESC LIMIT 1''',
+                (context_hash, response_type, f"{short_response_id}%")
             )
+            row = cursor.fetchone()
+            if row:
+                full_response_id = row[0]
+                # Обновляем рейтинг
+                cursor.execute(
+                    '''UPDATE responses 
+                       SET rating = rating + ? 
+                       WHERE context_hash = ? AND response_type = ? AND response_id = ?''',
+                    (delta, context_hash, response_type, full_response_id)
+                )
+                conn.commit()
+                print(f"✅ RL обновлён: {full_response_id} ({response_type}) {delta:+d}")
+            else:
+                # Если не нашли — создаём новую запись (на случай гонок)
+                cursor.execute(
+                    '''INSERT INTO responses 
+                       (context_hash, category, response_type, response_id, rating) 
+                       VALUES (?, ?, ?, ?, ?)''',
+                    (context_hash, "unknown", response_type, short_response_id, delta)
+                )
+                conn.commit()
+                print(f"🆕 Новая запись RL: {short_response_id} ({response_type}) {delta:+d}")
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ Ошибка БД в колбэке: {e}")
+        
+        # Визуальное подтверждение БЕЗ замены медиа (только меняем кнопки)
+        if action == '1':
+            new_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("❤️", callback_data="noop")
+            ]])
+            await query.edit_message_reply_markup(reply_markup=new_markup)
         else:
-            feedback_text = "💔 Прости, зайка. Больше так не отвечу — учусь на ошибках."
-            await query.edit_message_text(
-                text=feedback_text,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("💔", callback_data="noop")
-                ]])
-            )
+            new_markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("💔", callback_data="noop")
+            ]])
+            await query.edit_message_reply_markup(reply_markup=new_markup)
         
-        print(f"✅ Обратная связь получена: {action} для {response_id} ({response_type})")
-        
+        print(f"✅ Фидбек обработан: {'лайк' if action == '1' else 'дизлайк'} для контекста {context_hash}")
+
     except Exception as e:
         print(f"❌ Ошибка обработки колбэка: {e}")
-        await query.edit_message_text("⚠️ Не удалось обработать отзыв, но я всё равно учусь!")
+        try:
+            await query.edit_message_reply_markup(
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚠️", callback_data="noop")
+                ]])
+            )
+        except:
+            pass
 
 # ============ ЗАПУСК ============
 
