@@ -539,17 +539,17 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_like = f"r:1:{context_hash}v{short_resp_id}"
                 callback_dislike = f"r:0:{context_hash}v{short_resp_id}"
                 
-                # ✅ ЦВЕТНЫЕ КНОПКИ ЧЕРЕЗ ПРЕДОПРЕДЕЛЁННЫЕ СТИЛИ
+                # ✅ ЦВЕТНЫЕ КНОПКИ ЧЕРЕЗ api_kwargs (Bot API 9.4)
                 keyboard = [[
                     InlineKeyboardButton(
-                        text="Хороший ответ!", 
+                        text="💚",
                         callback_data=callback_like,
-                        style="success"  # ← ЗЕЛЁНЫЙ (успех/лайк)
+                        api_kwargs={"style": "success"}
                     ),
                     InlineKeyboardButton(
-                        text="Плохой ответ!", 
+                        text="🤍",
                         callback_data=callback_dislike,
-                        style="danger"   # ← КРАСНЫЙ (опасность/дизлайк)
+                        api_kwargs={"style": "primary"}
                     )
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -565,8 +565,8 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
                 short_resp_id = response_id[:6]
                 keyboard = [[
-                    InlineKeyboardButton("Хороший ответ!", callback_data=f"r:1:{context_hash}t{short_resp_id}", style="success"),
-                    InlineKeyboardButton("Плохой ответ!", callback_data=f"r:0:{context_hash}t{short_resp_id}", style="danger")
+                    InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}", api_kwargs={"style": "success"}),
+                    InlineKeyboardButton("🤍", callback_data=f"r:0:{context_hash}t{short_resp_id}", api_kwargs={"style": "primary"})
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -578,13 +578,22 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
             short_resp_id = response_id[:6]
             keyboard = [[
-                InlineKeyboardButton("Хороший ответ!", callback_data=f"r:1:{context_hash}t{short_resp_id}", style="success"),
-                InlineKeyboardButton("Плохой ответ!", callback_data=f"r:0:{context_hash}t{short_resp_id}", style="danger")
+                InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}", api_kwargs={"style": "success"}),
+                InlineKeyboardButton("🤍", callback_data=f"r:0:{context_hash}t{short_resp_id}", api_kwargs={"style": "primary"})
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             ensure_response_exists(context_hash, category, 'text', response_id)
             print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id})")
+
+    except Exception as e:
+        print(f"❌ Ошибка отправки: {e}")
+        import traceback
+        traceback.print_exc()
+        await update.message.reply_text(
+            "<b>💋💋💋</b>",
+            parse_mode=ParseMode.HTML
+        )
 
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
