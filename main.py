@@ -564,39 +564,54 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         if use_voice and has_voice_template:
-            # Получаем кандидатов и выбираем с учётом рейтинга
             voice_candidates = get_voice_files(category)
             chosen_voice, response_id = choose_best_candidate(context_hash, category, voice_candidates, 'voice')
             
             if chosen_voice:
-                # ⚠️ КРИТИЧЕСКИ ВАЖНО: сжимаем колбэк до ≤64 байт!
-                # Формат: "r:1:abc123vxxxxxx" (1+1+1+6+1+6 = 16 символов макс)
-                # где: 1=лайк, 0=дизлайк, v=голос, t=текст, xxxxxx=первые 6 символов ответа
-                short_resp_id = response_id[:6]  # ← только 6 символов!
+                short_resp_id = response_id[:6]
                 callback_like = f"r:1:{context_hash}v{short_resp_id}"
                 callback_dislike = f"r:0:{context_hash}v{short_resp_id}"
                 
+                # ЦВЕТНЫЕ КНОПКИ (новая фича Telegram Bot API 7.0+)
                 keyboard = [[
-                    InlineKeyboardButton("✅", callback_data=callback_like),
-                    InlineKeyboardButton("❌", callback_data=callback_dislike)
+                    InlineKeyboardButton(
+                        "✅", 
+                        callback_data=callback_like,
+                        background_color="#4CAF50",  # Нежно-зеленый
+                        text_color="#FFFFFF"
+                    ),
+                    InlineKeyboardButton(
+                        "❌", 
+                        callback_data=callback_dislike,
+                        background_color="#F44336",  # Нежно-красный
+                        text_color="#FFFFFF"
+                    )
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
-                # Отправляем голосовое с кнопками
                 with open(chosen_voice, "rb") as f:
                     await update.message.reply_voice(voice=f, reply_markup=reply_markup)
                 
-                # Гарантируем существование записи в БД (полный ID!)
                 ensure_response_exists(context_hash, category, 'voice', response_id)
-                print(f"🎤 Voice: {chosen_voice.name} (ID: {response_id}, short: {short_resp_id})")
+                print(f"🎤 Voice: {chosen_voice.name} (ID: {response_id})")
             else:
-                # Fallback на текст
+                # Fallback на текст с цветными кнопками
                 text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
                 chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
                 short_resp_id = response_id[:6]
                 keyboard = [[
-                    InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}"),
-                    InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}")
+                    InlineKeyboardButton(
+                        "✅", 
+                        callback_data=f"r:1:{context_hash}t{short_resp_id}",
+                        background_color="#4CAF50",
+                        text_color="#FFFFFF"
+                    ),
+                    InlineKeyboardButton(
+                        "❌", 
+                        callback_data=f"r:0:{context_hash}t{short_resp_id}",
+                        background_color="#F44336",
+                        text_color="#FFFFFF"
+                    )
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -604,20 +619,29 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"💬 Text (fallback): {chosen_text[:60]}...")
         
         else:
-            # Текстовый ответ с рейтингом
             text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
             chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
             
-            short_resp_id = response_id[:6]  # ← критически важно!
+            short_resp_id = response_id[:6]
             keyboard = [[
-                InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}"),
-                InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}")
+                InlineKeyboardButton(
+                    "✅", 
+                    callback_data=f"r:1:{context_hash}t{short_resp_id}",
+                    background_color="#4CAF50",
+                    text_color="#FFFFFF"
+                ),
+                InlineKeyboardButton(
+                    "❌", 
+                    callback_data=f"r:0:{context_hash}t{short_resp_id}",
+                    background_color="#F44336",
+                    text_color="#FFFFFF"
+                )
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             ensure_response_exists(context_hash, category, 'text', response_id)
-            print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id}, short: {short_resp_id})")
+            print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id})")
 
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
@@ -627,92 +651,79 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки лайк/дизлайк (с поддержкой сжатого формата)"""
+    """Обработчик нажатий на кнопки лайк/дизлайк с поддержкой нового формата"""
     query = update.callback_query
     await query.answer()
     
     data = query.data
-    # Формат: "r:1:abc123vxxxxxx" где:
-    #   r = rl prefix
-    #   1 = like (0 = dislike)
-    #   abc123 = 6-символьный хеш контекста
-    #   v/t = тип ответа (voice/text)
-    #   xxxxxx = первые 6 символов response_id
     if not data.startswith("r:"):
         return
     
     try:
-        # Парсим сжатый формат
-        parts = data.split(":")
+        # Парсим новый формат: "r:1:abc123vxxxxxx"
+        parts = data.split(":", 2)  # Делим только на 3 части
         if len(parts) != 3:
             return
         
-        action = parts[1]  # '1' или '0'
-        rest = parts[2]    # "abc123vxxxxxx"
+        _, action, payload = parts
         
-        if len(rest) < 8:  # минимум 6 символов хеш + 1 тип + 1 символ ответа
+        if len(payload) < 8:  # минимум 6 символов хеш + 1 тип + 1 символ ответа
             return
         
-        context_hash = rest[:6]
-        response_type_short = rest[6]
-        short_response_id = rest[7:13] if len(rest) >= 13 else rest[7:]
+        context_hash = payload[:6]
+        response_type_char = payload[6]
+        short_response_id = payload[7:13] if len(payload) >= 13 else payload[7:]
         
-        # Преобразуем короткие типы
-        response_type = 'text' if response_type_short == 't' else 'voice'
+        response_type = 'text' if response_type_char == 't' else 'voice'
         delta = 1 if action == '1' else -5
         
-        # ⚠️ ВАЖНО: для поиска в БД используем ПОЛНЫЙ ответ из контекста!
-        # Но так как мы не храним маппинг short→full, обновляем ВСЕ записи с этим хешем и типом
-        # (это безопасно — в одном контексте редко бывает много вариантов одного типа)
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            # Находим полный response_id по префиксу
-            cursor.execute(
-                '''SELECT response_id FROM responses 
-                   WHERE context_hash = ? AND response_type = ? 
-                   AND response_id LIKE ? 
-                   ORDER BY rating DESC LIMIT 1''',
-                (context_hash, response_type, f"{short_response_id}%")
-            )
-            row = cursor.fetchone()
-            if row:
-                full_response_id = row[0]
-                # Обновляем рейтинг
-                cursor.execute(
-                    '''UPDATE responses 
-                       SET rating = rating + ? 
-                       WHERE context_hash = ? AND response_type = ? AND response_id = ?''',
-                    (delta, context_hash, response_type, full_response_id)
-                )
-                conn.commit()
-                print(f"✅ RL обновлён: {full_response_id} ({response_type}) {delta:+d}")
-            else:
-                # Если не нашли — создаём новую запись (на случай гонок)
-                cursor.execute(
-                    '''INSERT INTO responses 
-                       (context_hash, category, response_type, response_id, rating) 
-                       VALUES (?, ?, ?, ?, ?)''',
-                    (context_hash, "unknown", response_type, short_response_id, delta)
-                )
-                conn.commit()
-                print(f"🆕 Новая запись RL: {short_response_id} ({response_type}) {delta:+d}")
-            conn.close()
-        except Exception as e:
-            print(f"⚠️ Ошибка БД в колбэке: {e}")
+        # Обновляем рейтинг в БД
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
         
-        # Визуальное подтверждение БЕЗ замены медиа (только меняем кнопки)
+        # Ищем полный response_id по префиксу
+        cursor.execute(
+            '''SELECT response_id FROM responses 
+               WHERE context_hash = ? AND response_type = ? 
+               AND response_id LIKE ? 
+               ORDER BY rating DESC LIMIT 1''',
+            (context_hash, response_type, f"{short_response_id}%")
+        )
+        row = cursor.fetchone()
+        
+        if row:
+            full_response_id = row[0]
+            cursor.execute(
+                '''UPDATE responses 
+                   SET rating = rating + ? 
+                   WHERE context_hash = ? AND response_type = ? AND response_id = ?''',
+                (delta, context_hash, response_type, full_response_id)
+            )
+            print(f"✅ RL обновлён: {full_response_id} ({response_type}) {delta:+d}")
+        else:
+            # Создаём новую запись если не найдена (защита от гонок)
+            cursor.execute(
+                '''INSERT INTO responses 
+                   (context_hash, category, response_type, response_id, rating) 
+                   VALUES (?, ?, ?, ?, ?)''',
+                (context_hash, "unknown", response_type, short_response_id or "unknown", delta)
+            )
+            print(f"🆕 Новая запись RL: {short_response_id} ({response_type}) {delta:+d}")
+        
+        conn.commit()
+        conn.close()
+        
+        # Визуальное подтверждение с ЭМОДЗИ-СЕРДЕЧКАМИ (без цветов, так как кнопка неактивна)
         if action == '1':
             new_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("❤️", callback_data="noop")
+                InlineKeyboardButton("❤️‍🔥", callback_data="noop")
             ]])
-            await query.edit_message_reply_markup(reply_markup=new_markup)
         else:
             new_markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("💔", callback_data="noop")
             ]])
-            await query.edit_message_reply_markup(reply_markup=new_markup)
         
+        await query.edit_message_reply_markup(reply_markup=new_markup)
         print(f"✅ Фидбек обработан: {'лайк' if action == '1' else 'дизлайк'} для контекста {context_hash}")
 
     except Exception as e:
@@ -729,43 +740,31 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ============ ЗАПУСК ============
 
 def main():
-    # Инициализация БД
     init_db()
     
-    # Проверка токена
     if not BOT_TOKEN:
         print("❌ ОШИБКА: BOT_TOKEN не задан в .env файле!")
-        print("\nСоздайте файл .env с содержимым:")
-        print("BOT_TOKEN=ваш_токен_от_@BotFather")
-        print("\nКак получить токен:")
-        print("1. Напишите @BotFather в Telegram")
-        print("2. Отправьте команду /newbot")
-        print("3. Следуйте инструкциям и скопируйте токен")
         exit(1)
     
-    # Проверка папки с голосовыми
     if not VOICES_DIR.exists():
         print(f"⚠️ Папка {VOICES_DIR} не найдена. Создаём...")
         VOICES_DIR.mkdir(exist_ok=True)
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Обработчики
+    # ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ КОЛБЭКОВ
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_random))
-    app.add_handler(CallbackQueryHandler(handle_rl_callback, pattern=r"^rl:[ld]:[a-f0-9]{8}:[tv]:[\w\-\.]{1,30}$"))
-    # Обработчик для "заглушек" после подтверждения
+    # Новый паттерн для обработки колбэков в формате "r:1:abc123vxxxxxx"
+    app.add_handler(CallbackQueryHandler(handle_rl_callback, pattern=r"^r:[01]:[a-f0-9]{6}[tv][a-zA-Z0-9_\-]{1,10}$"))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
     
     print("╔════════════════════════════════════════════════════════════════════╗")
     print("║  ✅ Бот «Полиночка от Сени» с обучением запущен! ❤️               ║")
     print("╠════════════════════════════════════════════════════════════════════╣")
     print(f"║  📊 RL-система: активна (20% исследования)                        ║")
-    print(f"║  🎤 Голосовые: {VOICE_PROBABILITY*100:.0f}% | 💬 Текстовые: шаблоны        ║")
+    print(f"║  🎨 Цветные кнопки: ✅ зелёный | ❌ красный (новое в Telegram!)   ║")
     print(f"║  💚 Лайк: +1 балл | 💔 Дизлайк: -5 баллов                         ║")
     print("╚════════════════════════════════════════════════════════════════════╝")
     print("\n💡 Бот учится на твоих реакциях — ставь ✅/❌ под каждым ответом!")
     app.run_polling()
-
-if __name__ == "__main__":
-    main()
