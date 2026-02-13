@@ -1,8 +1,33 @@
 """
 Бот для моей любимой девушки - Полины. От Сени на годовщину! ❤️
 Версия 4.0: обучение с подкреплением (лайк/дизлайк) + 33% ГС
+✅ Исправлено: защита от двойного запуска + стабильные эмодзи-кнопки
 """
 
+# ============ ЗАЩИТА ОТ ДВОЙНОГО ЗАПУСКА (КРИТИЧЕСКИ ВАЖНО) ============
+import fcntl
+import sys
+import os
+
+def single_instance_lock():
+    """Гарантирует, что запущен только один экземпляр бота"""
+    lock_path = "/tmp/polina_bot_v4.lock"
+    try:
+        lock_file = open(lock_path, "w")
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Сохраняем дескриптор в глобальную переменную, чтобы не закрылся
+        globals()["_BOT_LOCK_FILE"] = lock_file
+        print(f"✅ Единственный экземпляр бота запущен (блокировка: {lock_path})")
+        return True
+    except BlockingIOError:
+        print(f"❌ ОШИБКА: Бот уже запущен! (блокировка: {lock_path})")
+        print("   Остановите текущий экземпляр: sudo systemctl stop polina-bot")
+        sys.exit(1)
+
+# СРАЗУ ВЫЗЫВАЕМ ПРИ СТАРТЕ СКРИПТА
+single_instance_lock()
+
+# ============ СТАНДАРТНЫЕ ИМПОРТЫ ============
 import os
 import random
 import datetime
@@ -11,7 +36,7 @@ import pytz
 import sqlite3
 import hashlib
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardButtonStyle
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -51,7 +76,6 @@ def init_db():
             UNIQUE(context_hash, response_type, response_id)
         )
     ''')
-    # Индекс для быстрого поиска
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_context ON responses(context_hash, response_type)')
     conn.commit()
     conn.close()
@@ -92,21 +116,19 @@ def ensure_response_exists(context_hash: str, category: str, response_type: str,
 def update_rating(context_hash: str, response_type: str, response_id: str, delta: int):
     """Обновляет рейтинг ответа (+1 или -5)"""
     try:
-        # Сначала гарантируем существование записи
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute(
             '''INSERT OR IGNORE INTO responses 
                (context_hash, category, response_type, response_id, rating) 
                VALUES (?, ?, ?, ?, 0)''',
-            (context_hash, "unknown", response_type, response_id)  # категория для новых записей
+            (context_hash, "unknown", response_type, response_id)
         )
-        # Теперь обновляем рейтинг
         cursor.execute(
             '''UPDATE responses 
-               SET rating = rating + ?, category = ?
+               SET rating = rating + ? 
                WHERE context_hash = ? AND response_type = ? AND response_id = ?''',
-            (delta, "unknown", context_hash, response_type, response_id)  # категория обновится позже
+            (delta, context_hash, response_type, response_id)
         )
         conn.commit()
         conn.close()
@@ -239,16 +261,10 @@ TEXT_PHRASES = {
 }
 
 # ============ УМНОЕ РАСПОЗНАВАНИЕ ВОПРОСОВ ============
-
 def is_question(text: str) -> tuple[bool, str | None]:
-    """
-    Точно определяет вопросы с подкатегориями, включая фразы без '?'.
-    Возвращает: (является_вопросом, тип_вопроса_или_None)
-    """
     text_lower = text.lower().strip()
     has_q_mark = "?" in text_lower
     
-    # ===== 1. ЛОЖНЫЕ СРАБАТЫВАНИЯ (только если нет '?') =====
     false_positive_patterns = [
         r"\bкак будто\b",
         r"\bкак обычно\b",
@@ -256,18 +272,15 @@ def is_question(text: str) -> tuple[bool, str | None]:
         r"\bне знаю как\b",
         r"\bкак сделать\b",
         r"\bкак это работает\b",
-        r"\bкак думаешь ли\b"  # утвердительный контекст
+        r"\bкак думаешь ли\b"
     ]
     
     is_false_positive = not has_q_mark and any(re.search(pat, text_lower) for pat in false_positive_patterns)
     
-    # ===== 2. ПРИОРИТЕТНЫЕ ПАТТЕРНЫ ВОПРОСОВ (работают БЕЗ '?') =====
-    # "Как дела" и синонимы — главный кейс
     if re.search(r"(^|\s)(как дела|как ты|как настроение|как жизнь|как оно|чо там|чо как|ты как|как поживаешь|как сам)($|\s|\?)", text_lower):
         if not is_false_positive:
             return True, "howareyou"
     
-    # Другие вопросительные слова (даже без '?')
     q_patterns = {
         "why": r"(^|\s)(почему|зачем)($|\s|\?)",
         "when": r"(^|\s)(когда|во сколько)($|\s|\?)",
@@ -282,7 +295,6 @@ def is_question(text: str) -> tuple[bool, str | None]:
         if re.search(pattern, text_lower):
             return True, q_type
     
-    # ===== 3. КОРОТКИЕ ВОПРОСЫ (1-3 слова) =====
     words = text_lower.split()
     if len(words) <= 3:
         short_q = [
@@ -295,31 +307,24 @@ def is_question(text: str) -> tuple[bool, str | None]:
             if re.search(pat, text_lower):
                 return True, q_type
     
-    # ===== 4. ОБЩИЙ ВОПРОС ПО ЗНАКУ '?' =====
     if has_q_mark:
         return True, "question_other"
     
-    # ===== 5. ИНВЕРСИЯ (без '?') =====
     if re.search(r"\b(а ты|а я)\s+(хочешь|любишь|будешь|делаешь|сделаешь)\b", text_lower):
         return True, "question_other"
     
     return False, None
 
 # ============ ПРОВЕРКА ВРЕМЕНИ СНА ============
-
 def is_night_time() -> bool:
-    """Проверяет, сейчас ли время сна Полины (23:00–04:00 МСК)"""
     now_msk = datetime.datetime.now(MSK_TZ)
     hour = now_msk.hour
     return hour >= 23 or hour < 4
 
 # ============ УМНОЕ ОПРЕДЕЛЕНИЕ КАТЕГОРИИ ============
-
 def detect_category(text: str, user_id: int) -> str:
-    """Определяет категорию с приоритетом на вопросы и семантику"""
     text_lower = text.lower().strip()
     
-    # Инициализация контекста
     if user_id not in user_context:
         user_context[user_id] = {
             "history": [],
@@ -330,16 +335,13 @@ def detect_category(text: str, user_id: int) -> str:
     context = user_context[user_id]
     history = context["history"]
     
-    # ===== 1. ПЕРВЫЙ ПРИОРИТЕТ: ВОПРОСЫ =====
     is_q, q_type = is_question(text)
     if is_q:
-        # Контекстная обработка "а ты?" после вопроса о делах
         if q_type == "howareyou" and history:
             last_msg = history[-1].lower() if history else ""
             if "дела" in last_msg or "настроение" in last_msg or "как ты" in last_msg:
                 return "howareyou"
         
-        # Контекстная обработка "правда?" после комплимента/признания
         if q_type == "yes_no" and history:
             last_msg = history[-1].lower()
             if any(word in last_msg for word in ["люблю", "красив", "хорош", "лучш", "няшн"]):
@@ -347,7 +349,6 @@ def detect_category(text: str, user_id: int) -> str:
         
         return q_type or "question_other"
     
-    # ===== 2. АНАЛИЗ НАСТРОЕНИЯ =====
     if re.search(r"(грустно|плохо|тоска|печаль|не хочу|хочу плакать|грущу|одиноко)", text_lower):
         context["mood"] = "sad"
     elif re.search(r"(устал[ао]|вымотал[ао]сь|задолбало|надоело|энергии нет|спать хочу)", text_lower):
@@ -355,39 +356,30 @@ def detect_category(text: str, user_id: int) -> str:
     elif re.search(r"(отлично|супер|радость|круто|хорошо|люблю|счастлив[ао]|ура|класс)", text_lower):
         context["mood"] = "happy"
     
-    # ===== 3. СЕМАНТИЧЕСКИЕ ФРАЗЫ (ТОЧНЫЙ АНАЛИЗ) =====
-    
-    # Спокойной ночи — всегда приоритет
     if re.search(r"(спокойной ночи|споки|спокойненьких|спокойняшка|спасть\s+пора|спокойного|спи сладко)", text_lower):
         return "goodnight"
     
-    # Хочу спать / устала — с учётом времени сна!
     if re.search(r"(хочу спать|пора спать|надо спать|ложиться спать|засыпаю|сонная|спать хочу|глаза слипаются)", text_lower):
         return "goodnight" if is_night_time() else "goodnight_soft"
     
     if re.search(r"(устал[ао]|вымотал[ао]сь|задолбало|надоело)", text_lower):
         return "goodnight" if is_night_time() else "tired_day"
     
-    # Смех
     if re.search(r"(хаха|ахаха|смешно|ржу|смеюсь|😂|🤣|лол|кек|рофл|ахах|хи-хи)", text_lower):
         return "laugh"
     
-    # Приветствия
     if re.search(r"(привет|здравствуй|хай|йоу|даров|прив|хеллоу|ку|здарова|приветик|здравствуйте)", text_lower):
         return "greeting"
     
-    # Упоминание имени/ласковых
     if re.search(r"(полин[а-я]*|полюш|полюсик|писюл|писечк|шушик|зайк[ау]|любим[а-я]*|солнышко|малышк[ау])", text_lower):
         context["mentioned_name"] = True
         return "love_personal"
     
-    # Эмоциональное эхо "люблю"
     if "люблю" in text_lower:
         if history and any("люблю" in msg.lower() for msg in history[-2:]):
             return "love_intense"
         return "love"
     
-    # ===== 4. КОРОТКИЕ ОТВЕТЫ С КОНТЕКСТОМ =====
     if history and len(text_lower.split()) <= 3:
         last_category = context.get("last_category")
         if last_category == "goodnight" and re.search(r"(ты\?|а ты|сам[а]?|тоже|и я)", text_lower):
@@ -395,7 +387,6 @@ def detect_category(text: str, user_id: int) -> str:
         if last_category in ["howareyou", "greeting"] and re.search(r"(а ты\?|ты как|сам[а]?)", text_lower):
             return "howareyou"
     
-    # ===== 5. ФОЛБЭК ПО НАСТРОЕНИЮ =====
     if context["mood"] == "sad":
         return "comfort"
     if context["mood"] == "tired" and not is_night_time():
@@ -404,9 +395,7 @@ def detect_category(text: str, user_id: int) -> str:
     return "unknown"
 
 # ============ ВЫБОР ГОЛОСОВОГО ============
-
 def get_voice_files(category: str) -> list:
-    """Возвращает голосовые с точным соответствием категории"""
     if not VOICES_DIR.exists():
         return []
     
@@ -442,17 +431,14 @@ def get_voice_files(category: str) -> list:
         if candidates:
             return candidates
     
-    # Для вопросов — НЕ используем случайные любовные голосовые (только релевантные)
     if category in ["howareyou", "question_other", "why", "when", "where"]:
         question_voices = [f for f in all_files if any(kw in f.name.lower() for kw in ["дела", "как ты", "почему", "когда", "где"])]
         return question_voices if question_voices else []
     
-    # Для усталости днём — мягкие голосовые
     if category == "tired_day":
         soft_candidates = [f for f in all_files if any(kw in f.name.lower() for kw in ["soft", "тихо", "нежн", "обнима", "отдых"])]
         return soft_candidates if soft_candidates else []
     
-    # Фолбэк: общие любовные голосовые
     return [
         f for f in all_files
         if not any(prefix in f.name.lower() for prefix in ["00_", "01_", "02_", "03_"])
@@ -463,38 +449,25 @@ def get_voice_files(category: str) -> list:
     ]
 
 # ============ ВЫБОР ОТВЕТА С УЧЁТОМ РЕЙТИНГА ============
-
 def choose_best_candidate(context_hash: str, category: str, candidates: list, response_type: str):
-    """
-    Выбирает лучший ответ с учётом рейтинга из БД.
-    С вероятностью 20% выбирает случайный ответ для исследования.
-    Возвращает: (выбранный_кандидат, его_response_id)
-    """
     if not candidates:
         return None, None
     
-    # Вычисляем рейтинги для всех кандидатов
     rated_candidates = []
     for cand in candidates:
-        # Генерируем уникальный ID ответа
         if response_type == 'text':
-            # Для текста используем хеш первых 50 символов (для краткости)
             response_id = hashlib.md5(cand[:50].encode()).hexdigest()[:8]
-        else:  # voice
-            # Для голосового — имя файла без расширения
-            response_id = cand.stem[:20]  # ограничиваем длину
+        else:
+            response_id = cand.stem[:20]
         
         rating = get_rating(context_hash, response_type, response_id)
         rated_candidates.append((cand, rating, response_id))
     
-    # С вероятностью 20% выбираем случайного кандидата (исследование)
     if random.random() < EXPLORATION_RATE:
         chosen = random.choice(rated_candidates)
         print(f"🎲 Исследование: случайный выбор (рейтинги: {[r[1] for r in rated_candidates]})")
         return chosen[0], chosen[2]
     
-    # Иначе выбираем кандидата с максимальным рейтингом
-    # Если несколько с одинаковым максимумом — случайный из них
     max_rating = max(r[1] for r in rated_candidates)
     best_candidates = [r for r in rated_candidates if r[1] == max_rating]
     chosen = random.choice(best_candidates)
@@ -503,7 +476,6 @@ def choose_best_candidate(context_hash: str, category: str, candidates: list, re
     return chosen[0], chosen[2]
 
 # ============ ОБРАБОТЧИКИ ============
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     first_voice = VOICES_DIR / "00_first.ogg"
     
@@ -513,7 +485,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "<b><tg-emoji emoji-id='5202087689112790102'>❤️</tg-emoji> Полиночка, это мое первое голосовое, отправленное тебе.</b>\n"
             "<b>Пиши мне когда угодно и что угодно, я всегда отвечу! <tg-emoji emoji-id='5402288583069408773'>💕</tg-emoji></b>\n\n"
-            "<i>Теперь я учусь на твоих реакциях! Ставь ✅ если ответ понравился или ❌ если нет — я стану лучше для тебя ❤️</i>",
+            "<i>Теперь я учусь на твоих реакциях! Ставь 💚 если ответ понравился или 💔 если нет — я стану лучше для тебя ❤️</i>",
             parse_mode=ParseMode.HTML
         )
     else:
@@ -532,7 +504,6 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user_text:
         return
     
-    # Инициализация контекста
     if user_id not in user_context:
         user_context[user_id] = {
             "history": [],
@@ -541,21 +512,17 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "mentioned_name": False
         }
     
-    # Обновление истории
     user_context[user_id]["history"].append(user_text)
     if len(user_context[user_id]["history"]) > 3:
         user_context[user_id]["history"].pop(0)
     
-    # Формируем контекстный хеш из последних 2 сообщений (6 символов для экономии)
     history = user_context[user_id]["history"]
     context_string = " || ".join(history[-2:]) if len(history) >= 2 else (history[0] if history else user_text)
-    context_hash = hashlib.md5(context_string.encode()).hexdigest()[:6]  # ← 6 символов вместо 8!
+    context_hash = hashlib.md5(context_string.encode()).hexdigest()[:6]
     
-    # Определение категории
     category = detect_category(user_text, user_id)
     user_context[user_id]["last_category"] = category
 
-    # === ВЫБОР ФОРМАТА ОТВЕТА (фиксированные 33% ГС) ===
     use_voice = random.random() < VOICE_PROBABILITY
     has_voice_template = bool(get_voice_files(category))
     
@@ -563,16 +530,6 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"🧠 Категория: {category:15s} | Контекст: {context_hash}")
     
     try:
-        # Стили для кнопок (создаём один раз)
-        LIKE_STYLE = InlineKeyboardButtonStyle(
-            background_color="#4CAF50",
-            text_color="#FFFFFF"
-        )
-        DISLIKE_STYLE = InlineKeyboardButtonStyle(
-            background_color="#F44336",
-            text_color="#FFFFFF"
-        )
-        
         if use_voice and has_voice_template:
             voice_candidates = get_voice_files(category)
             chosen_voice, response_id = choose_best_candidate(context_hash, category, voice_candidates, 'voice')
@@ -582,17 +539,10 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_like = f"r:1:{context_hash}v{short_resp_id}"
                 callback_dislike = f"r:0:{context_hash}v{short_resp_id}"
                 
+                # ✅ БЕЗОПАСНЫЕ ЭМОДЗИ-КНОПКИ (100% работают в любой версии)
                 keyboard = [[
-                    InlineKeyboardButton(
-                        text="✅", 
-                        callback_data=callback_like,
-                        style=LIKE_STYLE
-                    ),
-                    InlineKeyboardButton(
-                        text="❌", 
-                        callback_data=callback_dislike,
-                        style=DISLIKE_STYLE
-                    )
+                    InlineKeyboardButton("💚", callback_data=callback_like),
+                    InlineKeyboardButton("💔", callback_data=callback_dislike)
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 
@@ -602,38 +552,43 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ensure_response_exists(context_hash, category, 'voice', response_id)
                 print(f"🎤 Voice: {chosen_voice.name} (ID: {response_id})")
             else:
-                # Fallback на текст
                 text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
                 chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
                 short_resp_id = response_id[:6]
                 keyboard = [[
-                    InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}", style=LIKE_STYLE),
-                    InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}", style=DISLIKE_STYLE)
+                    InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}"),
+                    InlineKeyboardButton("💔", callback_data=f"r:0:{context_hash}t{short_resp_id}")
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
                 ensure_response_exists(context_hash, category, 'text', response_id)
+                print(f"💬 Text (fallback): {chosen_text[:60]}...")
         
         else:
             text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
             chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
+            
             short_resp_id = response_id[:6]
             keyboard = [[
-                InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}", style=LIKE_STYLE),
-                InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}", style=DISLIKE_STYLE)
+                InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}"),
+                InlineKeyboardButton("💔", callback_data=f"r:0:{context_hash}t{short_resp_id}")
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
+            
             await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             ensure_response_exists(context_hash, category, 'text', response_id)
+            print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id})")
 
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
         import traceback
         traceback.print_exc()
-        await update.message.reply_text("<b>💋💋💋</b>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "<b>💋💋💋</b>",
+            parse_mode=ParseMode.HTML
+        )
 
 async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки лайк/дизлайк с поддержкой нового формата"""
     query = update.callback_query
     await query.answer()
     
@@ -642,14 +597,13 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     try:
-        # Парсим новый формат: "r:1:abc123vxxxxxx"
-        parts = data.split(":", 2)  # Делим только на 3 части
+        parts = data.split(":", 2)
         if len(parts) != 3:
             return
         
         _, action, payload = parts
         
-        if len(payload) < 8:  # минимум 6 символов хеш + 1 тип + 1 символ ответа
+        if len(payload) < 8:
             return
         
         context_hash = payload[:6]
@@ -659,11 +613,9 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         response_type = 'text' if response_type_char == 't' else 'voice'
         delta = 1 if action == '1' else -5
         
-        # Обновляем рейтинг в БД
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Ищем полный response_id по префиксу
         cursor.execute(
             '''SELECT response_id FROM responses 
                WHERE context_hash = ? AND response_type = ? 
@@ -683,7 +635,6 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             print(f"✅ RL обновлён: {full_response_id} ({response_type}) {delta:+d}")
         else:
-            # Создаём новую запись если не найдена (защита от гонок)
             cursor.execute(
                 '''INSERT INTO responses 
                    (context_hash, category, response_type, response_id, rating) 
@@ -695,14 +646,13 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         conn.commit()
         conn.close()
         
-        # Визуальное подтверждение с ЭМОДЗИ-СЕРДЕЧКАМИ (без цветов, так как кнопка неактивна)
         if action == '1':
             new_markup = InlineKeyboardMarkup([[
                 InlineKeyboardButton("❤️‍🔥", callback_data="noop")
             ]])
         else:
             new_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("💔", callback_data="noop")
+                InlineKeyboardButton("🖤", callback_data="noop")
             ]])
         
         await query.edit_message_reply_markup(reply_markup=new_markup)
@@ -710,6 +660,8 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     except Exception as e:
         print(f"❌ Ошибка обработки колбэка: {e}")
+        import traceback
+        traceback.print_exc()
         try:
             await query.edit_message_reply_markup(
                 reply_markup=InlineKeyboardMarkup([[
@@ -720,12 +672,13 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             pass
 
 # ============ ЗАПУСК ============
-
 def main():
     init_db()
     
     if not BOT_TOKEN:
         print("❌ ОШИБКА: BOT_TOKEN не задан в .env файле!")
+        print("\nСоздайте файл .env с содержимым:")
+        print("BOT_TOKEN=ваш_токен_от_@BotFather")
         exit(1)
     
     if not VOICES_DIR.exists():
@@ -734,19 +687,21 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ КОЛБЭКОВ
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_random))
-    # Новый паттерн для обработки колбэков в формате "r:1:abc123vxxxxxx"
-    app.add_handler(CallbackQueryHandler(handle_rl_callback, pattern=r"^r:[01]:[a-f0-9]{6}[tv][a-zA-Z0-9_\-]{1,10}$"))
+    # ✅ ИСПРАВЛЕННЫЙ ПАТТЕРН КОЛБЭКОВ
+    app.add_handler(CallbackQueryHandler(handle_rl_callback, pattern=r"^r:[01]:[a-f0-9]{6}[tv].{1,10}$"))
     app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
     
     print("╔════════════════════════════════════════════════════════════════════╗")
     print("║  ✅ Бот «Полиночка от Сени» с обучением запущен! ❤️               ║")
     print("╠════════════════════════════════════════════════════════════════════╣")
-    print(f"║  📊 RL-система: активна (20% исследования)                        ║")
-    print(f"║  🎨 Цветные кнопки: ✅ зелёный | ❌ красный (новое в Telegram!)   ║")
+    print(f"║  🔒 Защита от двойного запуска: АКТИВНА                           ║")
+    print(f"║  💚 Кнопки: эмодзи (стабильно) | 🎤 Голосовые: {VOICE_PROBABILITY*100:.0f}%          ║")
     print(f"║  💚 Лайк: +1 балл | 💔 Дизлайк: -5 баллов                         ║")
     print("╚════════════════════════════════════════════════════════════════════╝")
-    print("\n💡 Бот учится на твоих реакциях — ставь ✅/❌ под каждым ответом!")
+    print("\n💡 Бот учится на твоих реакциях — ставь 💚/💔 под каждым ответом!")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
