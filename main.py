@@ -1,6 +1,6 @@
 """
 Бот для моей любимой девушки - Полины. От Сени на годовщину! ❤️
-Версия 3.1: только шаблоны + 33% ГС (нейросеть удалена)
+Версия 4.0: обучение с подкреплением (лайк/дизлайк) + 33% ГС
 """
 
 import os
@@ -8,12 +8,15 @@ import random
 import datetime
 import re
 import pytz
+import sqlite3
+import hashlib
 from pathlib import Path
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters
 )
@@ -26,8 +29,90 @@ load_dotenv()
 # ============ НАСТРОЙКИ ============
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 VOICES_DIR = Path("voices")
+DB_PATH = Path("polina_rl.db")
 MSK_TZ = pytz.timezone("Europe/Moscow")
 VOICE_PROBABILITY = 0.33  # Фиксированные 33% на голосовое
+EXPLORATION_RATE = 0.2    # 20% шанс случайного выбора для исследования
+
+# ============ ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ============
+def init_db():
+    """Создает таблицы БД при первом запуске"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            context_hash TEXT NOT NULL,
+            category TEXT NOT NULL,
+            response_type TEXT NOT NULL CHECK(response_type IN ('text', 'voice')),
+            response_id TEXT NOT NULL,
+            rating INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(context_hash, response_type, response_id)
+        )
+    ''')
+    # Индекс для быстрого поиска
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_context ON responses(context_hash, response_type)')
+    conn.commit()
+    conn.close()
+    print(f"✅ База данных инициализирована: {DB_PATH}")
+
+def get_rating(context_hash: str, response_type: str, response_id: str) -> int:
+    """Получает текущий рейтинг ответа"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            'SELECT rating FROM responses WHERE context_hash = ? AND response_type = ? AND response_id = ?',
+            (context_hash, response_type, response_id)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception as e:
+        print(f"⚠️ Ошибка БД (get_rating): {e}")
+        return 0
+
+def ensure_response_exists(context_hash: str, category: str, response_type: str, response_id: str):
+    """Создает запись в БД, если её нет"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''INSERT OR IGNORE INTO responses 
+               (context_hash, category, response_type, response_id, rating) 
+               VALUES (?, ?, ?, ?, 0)''',
+            (context_hash, category, response_type, response_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ Ошибка БД (ensure_response): {e}")
+
+def update_rating(context_hash: str, response_type: str, response_id: str, delta: int):
+    """Обновляет рейтинг ответа (+1 или -5)"""
+    try:
+        # Сначала гарантируем существование записи
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            '''INSERT OR IGNORE INTO responses 
+               (context_hash, category, response_type, response_id, rating) 
+               VALUES (?, ?, ?, ?, 0)''',
+            (context_hash, "unknown", response_type, response_id)  # категория для новых записей
+        )
+        # Теперь обновляем рейтинг
+        cursor.execute(
+            '''UPDATE responses 
+               SET rating = rating + ?, category = ?
+               WHERE context_hash = ? AND response_type = ? AND response_id = ?''',
+            (delta, "unknown", context_hash, response_type, response_id)  # категория обновится позже
+        )
+        conn.commit()
+        conn.close()
+        print(f"📊 Рейтинг обновлён: {response_id} ({response_type}) {delta:+d}")
+    except Exception as e:
+        print(f"⚠️ Ошибка БД (update_rating): {e}")
 
 # ============ КОНТЕКСТНАЯ ПАМЯТЬ ============
 user_context = {}
@@ -97,7 +182,7 @@ TEXT_PHRASES = {
         "Полина, все хорошо, все супер. Ты отлично выглядишь, очень тебя люблю сильно. Очень красивая 💋",
         "Привет, Полина. Я тебя люблю очень сильно. Вот...",
         "Ой, это так мило!",
-        "Полина, я тебя люблю очень-очень сильно. Ты очень хорошенькая!",
+        "Полиночка, я тебя люблю очень-очень сильно. Ты очень хорошенькая!",
         "Полин, ты, ты очень красивая!",
         "Я тоже тебя очень сильно люблю! 💋",
         "Ты очень няшная. Ой, это так мило, Полина!",
@@ -377,6 +462,46 @@ def get_voice_files(category: str) -> list:
         and "greet" not in f.name.lower()
     ]
 
+# ============ ВЫБОР ОТВЕТА С УЧЁТОМ РЕЙТИНГА ============
+
+def choose_best_candidate(context_hash: str, category: str, candidates: list, response_type: str):
+    """
+    Выбирает лучший ответ с учётом рейтинга из БД.
+    С вероятностью 20% выбирает случайный ответ для исследования.
+    Возвращает: (выбранный_кандидат, его_response_id)
+    """
+    if not candidates:
+        return None, None
+    
+    # Вычисляем рейтинги для всех кандидатов
+    rated_candidates = []
+    for cand in candidates:
+        # Генерируем уникальный ID ответа
+        if response_type == 'text':
+            # Для текста используем хеш первых 50 символов (для краткости)
+            response_id = hashlib.md5(cand[:50].encode()).hexdigest()[:8]
+        else:  # voice
+            # Для голосового — имя файла без расширения
+            response_id = cand.stem[:20]  # ограничиваем длину
+        
+        rating = get_rating(context_hash, response_type, response_id)
+        rated_candidates.append((cand, rating, response_id))
+    
+    # С вероятностью 20% выбираем случайного кандидата (исследование)
+    if random.random() < EXPLORATION_RATE:
+        chosen = random.choice(rated_candidates)
+        print(f"🎲 Исследование: случайный выбор (рейтинги: {[r[1] for r in rated_candidates]})")
+        return chosen[0], chosen[2]
+    
+    # Иначе выбираем кандидата с максимальным рейтингом
+    # Если несколько с одинаковым максимумом — случайный из них
+    max_rating = max(r[1] for r in rated_candidates)
+    best_candidates = [r for r in rated_candidates if r[1] == max_rating]
+    chosen = random.choice(best_candidates)
+    
+    print(f"🧠 Эксплуатация: выбор по рейтингу (макс: {max_rating}, кандидатов: {len(best_candidates)})")
+    return chosen[0], chosen[2]
+
 # ============ ОБРАБОТЧИКИ ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -387,7 +512,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_voice(voice=f)
         await update.message.reply_text(
             "<b><tg-emoji emoji-id='5202087689112790102'>❤️</tg-emoji> Полиночка, это мое первое голосовое, отправленное тебе.</b>\n"
-            "<b>Пиши мне когда угодно и что угодно, я всегда отвечу! <tg-emoji emoji-id='5402288583069408773'>💕</tg-emoji></b>",
+            "<b>Пиши мне когда угодно и что угодно, я всегда отвечу! <tg-emoji emoji-id='5402288583069408773'>💕</tg-emoji></b>\n\n"
+            "<i>Теперь я учусь на твоих реакциях! Ставь ✅ если ответ понравился или ❌ если нет — я стану лучше для тебя ❤️</i>",
             parse_mode=ParseMode.HTML
         )
     else:
@@ -420,6 +546,11 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(user_context[user_id]["history"]) > 3:
         user_context[user_id]["history"].pop(0)
     
+    # Формируем контекстный хеш из последних 2 сообщений
+    history = user_context[user_id]["history"]
+    context_string = " || ".join(history[-2:]) if len(history) >= 2 else (history[0] if history else user_text)
+    context_hash = hashlib.md5(context_string.encode()).hexdigest()[:8]  # 8 символов для колбэка
+    
     # Определение категории
     category = detect_category(user_text, user_id)
     user_context[user_id]["last_category"] = category
@@ -429,22 +560,56 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_voice_template = bool(get_voice_files(category))
     
     print(f"\n📥 [{datetime.datetime.now(MSK_TZ).strftime('%H:%M:%S')}] '{user_text[:40]}'")
-    print(f"🧠 Категория: {category:15s} | ГС: {str(use_voice and has_voice_template):5s}")
+    print(f"🧠 Категория: {category:15s} | Контекст: {context_hash}")
     
     try:
         if use_voice and has_voice_template:
-            # Отправляем голосовое из шаблона
-            candidates = get_voice_files(category)
-            voice_path = random.choice(candidates)
-            with open(voice_path, "rb") as f:
-                await update.message.reply_voice(voice=f)
-            print(f"🎤 Voice: {voice_path.name}")
+            # Получаем кандидатов и выбираем с учётом рейтинга
+            voice_candidates = get_voice_files(category)
+            chosen_voice, response_id = choose_best_candidate(context_hash, category, voice_candidates, 'voice')
             
+            if chosen_voice:
+                # Создаём инлайн-кнопки с эмодзи для цветовой индикации
+                keyboard = [[
+                    InlineKeyboardButton("✅", callback_data=f"rl:l:{context_hash}:v:{response_id}"),
+                    InlineKeyboardButton("❌", callback_data=f"rl:d:{context_hash}:v:{response_id}")
+                ]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Отправляем голосовое с кнопками
+                with open(chosen_voice, "rb") as f:
+                    await update.message.reply_voice(voice=f, reply_markup=reply_markup)
+                
+                # Гарантируем существование записи в БД
+                ensure_response_exists(context_hash, category, 'voice', response_id)
+                print(f"🎤 Voice: {chosen_voice.name} (ID: {response_id})")
+            else:
+                # Fallback на текст
+                text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
+                chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
+                keyboard = [[
+                    InlineKeyboardButton("✅", callback_data=f"rl:l:{context_hash}:t:{response_id}"),
+                    InlineKeyboardButton("❌", callback_data=f"rl:d:{context_hash}:t:{response_id}")
+                ]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+                ensure_response_exists(context_hash, category, 'text', response_id)
+                print(f"💬 Text (fallback): {chosen_text[:60]}...")
+        
         else:
-            # Отправляем текстовый шаблон (гарантированно существует)
-            phrase = random.choice(TEXT_PHRASES.get(category, TEXT_PHRASES["love"]))
-            await update.message.reply_text(f"<b>{phrase}</b>", parse_mode=ParseMode.HTML)
-            print(f"💬 Text: {phrase[:60]}...")
+            # Текстовый ответ с рейтингом
+            text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
+            chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
+            
+            keyboard = [[
+                InlineKeyboardButton("✅", callback_data=f"rl:l:{context_hash}:t:{response_id}"),
+                InlineKeyboardButton("❌", callback_data=f"rl:d:{context_hash}:t:{response_id}")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            ensure_response_exists(context_hash, category, 'text', response_id)
+            print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id})")
 
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
@@ -453,9 +618,64 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML
         )
 
+async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик нажатий на кнопки лайк/дизлайк"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    # Формат: rl:l:abc123:v:filename или rl:d:abc123:t:hash
+    if not data.startswith("rl:"):
+        return
+    
+    try:
+        parts = data.split(":")
+        if len(parts) != 5:
+            return
+        
+        action = parts[1]  # 'l' или 'd'
+        context_hash = parts[2]
+        response_type_short = parts[3]  # 't' или 'v'
+        response_id = parts[4]
+        
+        # Преобразуем короткие типы
+        response_type = 'text' if response_type_short == 't' else 'voice'
+        delta = 1 if action == 'l' else -5
+        
+        # Обновляем рейтинг в БД
+        update_rating(context_hash, response_type, response_id, delta)
+        
+        # Формируем сообщение подтверждения
+        if action == 'l':
+            feedback_text = "❤️ Спасибо, Полиночка! Я запомнил, что тебе это понравилось."
+            # Для визуального подтверждения используем анимацию сердца
+            await query.edit_message_text(
+                text=feedback_text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❤️", callback_data="noop")
+                ]])
+            )
+        else:
+            feedback_text = "💔 Прости, зайка. Больше так не отвечу — учусь на ошибках."
+            await query.edit_message_text(
+                text=feedback_text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💔", callback_data="noop")
+                ]])
+            )
+        
+        print(f"✅ Обратная связь получена: {action} для {response_id} ({response_type})")
+        
+    except Exception as e:
+        print(f"❌ Ошибка обработки колбэка: {e}")
+        await query.edit_message_text("⚠️ Не удалось обработать отзыв, но я всё равно учусь!")
+
 # ============ ЗАПУСК ============
 
 def main():
+    # Инициализация БД
+    init_db()
+    
     # Проверка токена
     if not BOT_TOKEN:
         print("❌ ОШИБКА: BOT_TOKEN не задан в .env файле!")
@@ -474,16 +694,21 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     
+    # Обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_random))
+    app.add_handler(CallbackQueryHandler(handle_rl_callback, pattern=r"^rl:[ld]:[a-f0-9]{8}:[tv]:[\w\-\.]{1,30}$"))
+    # Обработчик для "заглушек" после подтверждения
+    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
     
-    print("╔══════════════════════════════════════════════════════════╗")
-    print("║  ✅ Бот «Полиночка от Сени» запущен! ❤️                 ║")
-    print("╠══════════════════════════════════════════════════════════╣")
-    print(f"║  🎤 Голосовые: {VOICE_PROBABILITY*100:.0f}%")
-    print(f"║  💬 Текстовые: шаблоны из памяти Сени")
-    print("╚══════════════════════════════════════════════════════════╝")
-    print("\n💡 Бот отвечает только проверенными фразами и голосовыми")
+    print("╔════════════════════════════════════════════════════════════════════╗")
+    print("║  ✅ Бот «Полиночка от Сени» с обучением запущен! ❤️               ║")
+    print("╠════════════════════════════════════════════════════════════════════╣")
+    print(f"║  📊 RL-система: активна (20% исследования)                        ║")
+    print(f"║  🎤 Голосовые: {VOICE_PROBABILITY*100:.0f}% | 💬 Текстовые: шаблоны        ║")
+    print(f"║  💚 Лайк: +1 балл | 💔 Дизлайк: -5 баллов                         ║")
+    print("╚════════════════════════════════════════════════════════════════════╝")
+    print("\n💡 Бот учится на твоих реакциях — ставь ✅/❌ под каждым ответом!")
     app.run_polling()
 
 if __name__ == "__main__":
