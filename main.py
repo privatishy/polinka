@@ -494,6 +494,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Положи первое голосовое с именем 00_first.ogg"
         )
 
+async def send_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет единственную фотографию из папки voices/ без текста и кнопок"""
+    if update.effective_chat.type != "private":
+        return  # Игнорируем команду в группах
+    
+    # Ищем ЛЮБОЕ фото в папке с голосовыми
+    image_files = list(VOICES_DIR.glob("*.jpg")) + \
+                  list(VOICES_DIR.glob("*.jpeg")) + \
+                  list(VOICES_DIR.glob("*.png"))
+    
+    if not image_files:
+        # Не ругаемся — просто молча не отправляем ничего (или отправляем поцелуй)
+        await update.message.reply_text("💋")
+        return
+    
+    # Берём первую найденную фотку
+    chosen_image = image_files[0]
+    
+    try:
+        with open(chosen_image, "rb") as f:
+            await update.message.reply_photo(photo=f)  # Без caption и кнопок!
+        print(f"🖼️ Отправлена фотка: {chosen_image.name}")
+    except Exception as e:
+        print(f"❌ Ошибка отправки фото: {e}")
+        await update.message.reply_text("💋")
+
 async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
         return
@@ -704,6 +730,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("image", send_image))  # ← ДОБАВЬТЕ ЭТУ СТРОКУ
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_random))
     # ✅ ИСПРАВЛЕННЫЙ ПАТТЕРН КОЛБЭКОВ
     app.add_handler(CallbackQueryHandler(handle_rl_callback, pattern=r"^r:[01]:[a-f0-9]{6}[tv].{1,10}$"))
