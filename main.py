@@ -36,7 +36,7 @@ import pytz
 import sqlite3
 import hashlib
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardButtonStyle
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -47,18 +47,6 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
-
-# ============ НЕЖНЫЕ СТИЛИ ДЛЯ КНОПОК (РОМАНТИЧНАЯ ПАЛИТРА) ============
-# Цвета подобраны по гайдлайнам Material Design для максимальной нежности
-LIKE_STYLE = InlineKeyboardButtonStyle(
-    text_color="#1B5E20",      # Тёмно-зелёный текст (контраст на светлом фоне)
-    background_color="#A5D6A7"  # Нежно-зелёный фон (Green 200)
-)
-
-DISLIKE_STYLE = InlineKeyboardButtonStyle(
-    text_color="#263238",      # Тёмно-серый текст
-    background_color="#B0BEC5"  # Нежно-серый фон (Blue Grey 200) — мягкая "грусть"
-)
 
 # ============ ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ============
 load_dotenv()
@@ -551,17 +539,17 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_like = f"r:1:{context_hash}v{short_resp_id}"
                 callback_dislike = f"r:0:{context_hash}v{short_resp_id}"
                 
-                # ✅ ЦВЕТНЫЕ КНОПКИ С НЕЖНЫМИ СТИЛЯМИ
+                # ✅ ЦВЕТНЫЕ КНОПКИ ЧЕРЕЗ ПРЕДОПРЕДЕЛЁННЫЕ СТИЛИ
                 keyboard = [[
                     InlineKeyboardButton(
-                        text="💚", 
+                        text="Хороший ответ!", 
                         callback_data=callback_like,
-                        style=LIKE_STYLE  # ← Применяем стиль лайка
+                        style="success"  # ← ЗЕЛЁНЫЙ (успех/лайк)
                     ),
                     InlineKeyboardButton(
-                        text="💔", 
+                        text="Плохой ответ!", 
                         callback_data=callback_dislike,
-                        style=DISLIKE_STYLE  # ← Применяем стиль дизлайка
+                        style="danger"   # ← КРАСНЫЙ (опасность/дизлайк)
                     )
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -577,8 +565,8 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
                 short_resp_id = response_id[:6]
                 keyboard = [[
-                    InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}", style=LIKE_STYLE),
-                    InlineKeyboardButton("💔", callback_data=f"r:0:{context_hash}t{short_resp_id}", style=DISLIKE_STYLE)
+                    InlineKeyboardButton("Хороший ответ!", callback_data=f"r:1:{context_hash}t{short_resp_id}", style="success"),
+                    InlineKeyboardButton("Плохой ответ!", callback_data=f"r:0:{context_hash}t{short_resp_id}", style="danger")
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -590,8 +578,8 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
             short_resp_id = response_id[:6]
             keyboard = [[
-                InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}", style=LIKE_STYLE),
-                InlineKeyboardButton("💔", callback_data=f"r:0:{context_hash}t{short_resp_id}", style=DISLIKE_STYLE)
+                InlineKeyboardButton("Хороший ответ!", callback_data=f"r:1:{context_hash}t{short_resp_id}", style="success"),
+                InlineKeyboardButton("Плохой ответ!", callback_data=f"r:0:{context_hash}t{short_resp_id}", style="danger")
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -667,11 +655,11 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if action == '1':
             new_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("❤️‍🔥", callback_data="noop")
+                InlineKeyboardButton("Я стал лучше!", callback_data="noop", style="primary")
             ]])
         else:
             new_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🖤", callback_data="noop")
+                InlineKeyboardButton("Я стану лучше!", callback_data="noop", style="primary")
             ]])
         
         await query.edit_message_reply_markup(reply_markup=new_markup)
