@@ -11,7 +11,7 @@ import pytz
 import sqlite3
 import hashlib
 from pathlib import Path
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineKeyboardButtonStyle
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -563,6 +563,16 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"🧠 Категория: {category:15s} | Контекст: {context_hash}")
     
     try:
+        # Стили для кнопок (создаём один раз)
+        LIKE_STYLE = InlineKeyboardButtonStyle(
+            background_color="#4CAF50",
+            text_color="#FFFFFF"
+        )
+        DISLIKE_STYLE = InlineKeyboardButtonStyle(
+            background_color="#F44336",
+            text_color="#FFFFFF"
+        )
+        
         if use_voice and has_voice_template:
             voice_candidates = get_voice_files(category)
             chosen_voice, response_id = choose_best_candidate(context_hash, category, voice_candidates, 'voice')
@@ -572,19 +582,16 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_like = f"r:1:{context_hash}v{short_resp_id}"
                 callback_dislike = f"r:0:{context_hash}v{short_resp_id}"
                 
-                # ЦВЕТНЫЕ КНОПКИ (новая фича Telegram Bot API 7.0+)
                 keyboard = [[
                     InlineKeyboardButton(
-                        "✅", 
+                        text="✅", 
                         callback_data=callback_like,
-                        background_color="#4CAF50",  # Нежно-зеленый
-                        text_color="#FFFFFF"
+                        style=LIKE_STYLE
                     ),
                     InlineKeyboardButton(
-                        "❌", 
+                        text="❌", 
                         callback_data=callback_dislike,
-                        background_color="#F44336",  # Нежно-красный
-                        text_color="#FFFFFF"
+                        style=DISLIKE_STYLE
                     )
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -595,60 +602,35 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ensure_response_exists(context_hash, category, 'voice', response_id)
                 print(f"🎤 Voice: {chosen_voice.name} (ID: {response_id})")
             else:
-                # Fallback на текст с цветными кнопками
+                # Fallback на текст
                 text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
                 chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
                 short_resp_id = response_id[:6]
                 keyboard = [[
-                    InlineKeyboardButton(
-                        "✅", 
-                        callback_data=f"r:1:{context_hash}t{short_resp_id}",
-                        background_color="#4CAF50",
-                        text_color="#FFFFFF"
-                    ),
-                    InlineKeyboardButton(
-                        "❌", 
-                        callback_data=f"r:0:{context_hash}t{short_resp_id}",
-                        background_color="#F44336",
-                        text_color="#FFFFFF"
-                    )
+                    InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}", style=LIKE_STYLE),
+                    InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}", style=DISLIKE_STYLE)
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
                 ensure_response_exists(context_hash, category, 'text', response_id)
-                print(f"💬 Text (fallback): {chosen_text[:60]}...")
         
         else:
             text_candidates = TEXT_PHRASES.get(category, TEXT_PHRASES["love"])
             chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
-            
             short_resp_id = response_id[:6]
             keyboard = [[
-                InlineKeyboardButton(
-                    "✅", 
-                    callback_data=f"r:1:{context_hash}t{short_resp_id}",
-                    background_color="#4CAF50",
-                    text_color="#FFFFFF"
-                ),
-                InlineKeyboardButton(
-                    "❌", 
-                    callback_data=f"r:0:{context_hash}t{short_resp_id}",
-                    background_color="#F44336",
-                    text_color="#FFFFFF"
-                )
+                InlineKeyboardButton("✅", callback_data=f"r:1:{context_hash}t{short_resp_id}", style=LIKE_STYLE),
+                InlineKeyboardButton("❌", callback_data=f"r:0:{context_hash}t{short_resp_id}", style=DISLIKE_STYLE)
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            
             await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
             ensure_response_exists(context_hash, category, 'text', response_id)
-            print(f"💬 Text: {chosen_text[:60]}... (ID: {response_id})")
 
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
-        await update.message.reply_text(
-            "<b>💋💋💋</b>",
-            parse_mode=ParseMode.HTML
-        )
+        import traceback
+        traceback.print_exc()
+        await update.message.reply_text("<b>💋💋💋</b>", parse_mode=ParseMode.HTML)
 
 async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик нажатий на кнопки лайк/дизлайк с поддержкой нового формата"""
