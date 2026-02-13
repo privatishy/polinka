@@ -542,14 +542,14 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # ✅ ЦВЕТНЫЕ КНОПКИ ЧЕРЕЗ api_kwargs (Bot API 9.4)
                 keyboard = [[
                     InlineKeyboardButton(
-                        text="💚",
+                        text="Хороший ответ!",
                         callback_data=callback_like,
                         api_kwargs={"style": "success"}
                     ),
                     InlineKeyboardButton(
-                        text="🤍",
+                        text="Плохой ответ!",
                         callback_data=callback_dislike,
-                        api_kwargs={"style": "primary"}
+                        api_kwargs={"style": "danger"}
                     )
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -565,8 +565,8 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
                 short_resp_id = response_id[:6]
                 keyboard = [[
-                    InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}", api_kwargs={"style": "success"}),
-                    InlineKeyboardButton("🤍", callback_data=f"r:0:{context_hash}t{short_resp_id}", api_kwargs={"style": "primary"})
+                    InlineKeyboardButton("Хороший ответ!", callback_data=f"r:1:{context_hash}t{short_resp_id}", api_kwargs={"style": "success"}),
+                    InlineKeyboardButton("Плохой ответ!", callback_data=f"r:0:{context_hash}t{short_resp_id}", api_kwargs={"style": "danger"})
                 ]]
                 reply_markup = InlineKeyboardMarkup(keyboard)
                 await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -578,8 +578,8 @@ async def reply_random(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chosen_text, response_id = choose_best_candidate(context_hash, category, text_candidates, 'text')
             short_resp_id = response_id[:6]
             keyboard = [[
-                InlineKeyboardButton("💚", callback_data=f"r:1:{context_hash}t{short_resp_id}", api_kwargs={"style": "success"}),
-                InlineKeyboardButton("🤍", callback_data=f"r:0:{context_hash}t{short_resp_id}", api_kwargs={"style": "primary"})
+                InlineKeyboardButton("Хороший ответ!", callback_data=f"r:1:{context_hash}t{short_resp_id}", api_kwargs={"style": "success"}),
+                InlineKeyboardButton("Плохой ответ!", callback_data=f"r:0:{context_hash}t{short_resp_id}", api_kwargs={"style": "danger"})
             ]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(chosen_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
@@ -664,11 +664,11 @@ async def handle_rl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if action == '1':
             new_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Я стал лучше!", callback_data="noop", style="primary")
+                InlineKeyboardButton("Я стал лучше!", callback_data="noop", api_kwargs={"style": "primary"})
             ]])
         else:
             new_markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("Я стану лучше!", callback_data="noop", style="primary")
+                InlineKeyboardButton("Я стану лучше!", callback_data="noop", api_kwargs={"style": "primary"})
             ]])
         
         await query.edit_message_reply_markup(reply_markup=new_markup)
